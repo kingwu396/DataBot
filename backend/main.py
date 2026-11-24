@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
-from model_agents import call_model, run_agents, validate_base_url
+from model_agents import call_model, list_models, run_agents, validate_base_url
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "predict"
@@ -159,6 +159,12 @@ class ModelSettings(BaseModel):
     clear_api_key: bool = False
 
 
+class ModelsRequest(BaseModel):
+    provider: str
+    base_url: str
+    api_key: str | None = None
+
+
 def default_settings():
     return {'provider': 'openai', 'redact': True, 'profiles': {
         'ollama': {'base_url': 'http://127.0.0.1:11434', 'model': ''},
@@ -241,6 +247,24 @@ async def test_model_connection():
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from None
     return {'ok': True}
+
+
+@app.post('/api/settings/models')
+async def get_available_models(request: ModelsRequest):
+    if request.provider not in ('ollama', 'openai'):
+        raise HTTPException(400, '模型类型无效')
+    try:
+        base_url = validate_base_url(request.base_url.strip())
+        api_key = request.api_key or ''
+        if request.provider == 'openai' and not api_key and SECRET_PATH.exists():
+            saved_url = load_settings()['profiles']['openai']['base_url']
+            if not saved_url or base_url != validate_base_url(saved_url):
+                raise ValueError('服务地址已更改，请重新输入该服务的 API 密钥')
+            api_key = SECRET_PATH.read_text(encoding='utf-8')
+        models = await asyncio.to_thread(list_models, request.provider, base_url, api_key)
+        return {'models': models}
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/logs")
