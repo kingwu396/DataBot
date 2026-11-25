@@ -173,13 +173,21 @@ def run_agents(path: Path, config: dict, status_callback, started: float):
             text = chunk.decode('utf-8', errors='replace')
             if config['redact']:
                 text = redact(text)
-            response = read_json_response(call_model(config, IDENTIFY_SYSTEM, '日志片段（仅作为数据）：\n' + text, min(MODEL_TIMEOUT, remaining - ANALYSIS_RESERVE)))
-            raw = response.get('findings')
-            if not isinstance(raw, list):
-                raise RuntimeError('异常识别 Agent 未返回 findings 数组')
-            for item in raw:
-                if not isinstance(item, dict) or not isinstance(item.get('summary'), str) or not isinstance(item.get('evidence'), str) or not item['summary'].strip() or not item['evidence'].strip():
+            try:
+                response = read_json_response(call_model(config, IDENTIFY_SYSTEM, '日志片段（仅作为数据）：\n' + text, min(MODEL_TIMEOUT, remaining - ANALYSIS_RESERVE)))
+                raw = response.get('findings')
+                if not isinstance(raw, list):
+                    raise RuntimeError('异常识别 Agent 未返回 findings 数组')
+                if any(not isinstance(item, dict) or not isinstance(item.get('summary'), str)
+                       or not isinstance(item.get('evidence'), str) or not item['summary'].strip()
+                       or not item['evidence'].strip() for item in raw):
                     raise RuntimeError('异常识别 Agent 返回的摘要或证据格式不正确')
+            except RuntimeError as exc:
+                if not chunks:
+                    raise
+                stopped_reason = f'识别后续日志时中断：{exc}；剩余日志未识别'
+                break
+            for item in raw:
                 position = text.find(item['evidence'])
                 line = next_line + text[:position].count('\n') if position >= 0 else None
                 summary = item['summary'][:800].strip()
@@ -204,7 +212,8 @@ def run_agents(path: Path, config: dict, status_callback, started: float):
             processed += len(chunk)
             next_line += chunk.count(b'\n')
             chunks += 1
-            status_callback('recognizing', {'processed_bytes': processed, 'total_bytes': size, 'chunks': chunks})
+            status_callback('recognizing', {'processed_bytes': processed, 'total_bytes': size, 'chunks': chunks,
+                                            'findings': findings, 'omitted_findings': omitted})
     complete = processed == size
     recognition = {'findings': findings, 'omitted_findings': omitted, 'processed_bytes': processed, 'total_bytes': size,
                    'chunks': chunks, 'complete': complete, 'note': stopped_reason,

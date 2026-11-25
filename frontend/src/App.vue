@@ -4,6 +4,11 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 const logs = ref([]), selected = ref(''), file = ref(null), source = ref('existing')
 const job = ref(null), history = ref([]), error = ref(''), busy = ref(false)
+const historyTab = ref('completed'), selectedHistory = ref([]), historyMessage = ref(''), deleting = ref(false)
+const groups = [{id:'completed',label:'分析成功'}, {id:'partial',label:'部分识别'}, {id:'failed',label:'分析失败'}, {id:'active',label:'进行中'}]
+const groupOf = item => ['completed','partial','failed'].includes(item.status) ? item.status : 'active'
+const visibleHistory = computed(() => history.value.filter(item => groupOf(item) === historyTab.value))
+const allVisibleSelected = computed(() => visibleHistory.value.length > 0 && visibleHistory.value.every(item => selectedHistory.value.includes(item.id)))
 const analysisHtml = computed(() => DOMPurify.sanitize(marked.parse(job.value?.result?.agents?.presentation || job.value?.result?.agents?.analysis || ''), { FORBID_TAGS: ['img', 'style'] }))
 const originalAnalysisHtml = computed(() => DOMPurify.sanitize(marked.parse(job.value?.result?.agents?.analysis || ''), { FORBID_TAGS: ['img', 'style'] }))
 const settings = ref({provider:'openai', profiles:{ollama:{base_url:'http://127.0.0.1:11434',model:''},openai:{base_url:'https://api.openai.com/v1',model:''}}, redact:true, api_key:'', has_api_key:false})
@@ -22,6 +27,19 @@ async function api(url, opts) {
   return body
 }
 async function refreshHistory() { history.value = await api('/api/analyses') }
+function changeHistoryTab(id) { historyTab.value = id; selectedHistory.value = []; historyMessage.value = '' }
+function selectVisible(event) { selectedHistory.value = event.target.checked ? visibleHistory.value.map(item => item.id) : [] }
+async function deleteHistory(ids) {
+  if (!ids.length || deleting.value) return
+  if (!window.confirm(`确定删除 ${ids.length} 条分析记录？删除后无法恢复，原始日志文件不会被删除。`)) return
+  deleting.value = true; historyMessage.value = ''
+  try {
+    await api('/api/analyses/delete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})})
+    if (job.value && ids.includes(job.value.id)) job.value = null
+    selectedHistory.value = []; await refreshHistory(); historyMessage.value = `已删除 ${ids.length} 条分析记录。`
+  } catch (e) { historyMessage.value = e.message; await refreshHistory() }
+  finally { deleting.value = false }
+}
 async function poll(id) {
   try {
     job.value = await api(`/api/analyses/${id}`)
@@ -93,10 +111,11 @@ onUnmounted(() => clearTimeout(timer))
         <section class="panel result-panel"><div class="section-title"><div><span class="number">03</span><h2>分析结果</h2></div><p v-if="job">{{job.filename}}</p></div>
           <div v-if="!job" class="empty"><div class="empty-icon">⌁</div><strong>选择日志，开始第一次分析</strong><p>完成后将在这里显示异常统计与日志片段。</p></div>
           <div v-else-if="['pending','running','recognizing','analyzing','rewriting'].includes(job.status)" class="empty"><div class="spinner"></div><strong>{{job.status==='recognizing' ? '异常识别 Agent 正在识别' : job.status==='analyzing' ? '问题分析 Agent 正在分析' : job.status==='rewriting' ? '正在整理分析结果' : '正在扫描日志'}}</strong><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}，{{job.result.recognition_progress.chunks}} 个片段</p><p>大文件可能需要一些时间，请保持页面打开。</p></div>
-          <div v-else-if="job.status==='failed'" class="empty"><strong>分析未完成</strong><p class="error">{{job.error}}</p><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}</p></div>
+          <div v-else-if="job.status==='failed'"><strong>分析未完成</strong><p class="error">{{job.error}}</p><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}；问题分析未完成，结果不能代表完整日志。</p><details v-if="job.result?.recognition_progress?.findings?.length" class="result-details"><summary>查看已识别的发现（{{job.result.recognition_progress.findings.length}} 条）</summary><div v-for="(finding, index) in job.result.recognition_progress.findings" :key="index" class="example"><strong>{{finding.summary}}</strong><p class="hint">{{finding.severity}} · {{finding.evidence_verified ? '证据与输入片段匹配' : '证据待核查'}}<span v-if="finding.line != null"> · 第 {{finding.line}} 行</span></p><pre>{{finding.evidence}}</pre></div></details></div>
           <div v-else-if="job.result"><div class="result-meta">{{job.status==='partial' ? '部分识别，未覆盖全部日志' : job.result.agents ? '两个 Agent 已完成' : '规则扫描记录'}} <span>{{job.elapsed}} 秒</span></div><div class="metrics"><div><span>日志记录</span><strong>{{job.result.counts.records.toLocaleString()}}</strong></div><div><span>错误记录</span><strong>{{job.result.counts.error.toLocaleString()}}</strong></div><div><span>警告记录</span><strong>{{job.result.counts.warning.toLocaleString()}}</strong></div></div><p class="hint">规则统计可能重叠；本地展示的片段可能含敏感信息。</p>
             <template v-if="job.result.agents">
               <p class="hint">模型识别覆盖：{{size(job.result.agents.recognition.processed_bytes)}} / {{size(job.result.agents.recognition.total_bytes)}}<span v-if="!job.result.agents.recognition.complete">，剩余日志未识别</span>。</p>
+              <p v-if="job.result.agents.recognition.note" class="error">{{job.result.agents.recognition.note}}</p>
               <h3>问题分析 Agent <span v-if="job.result.agents.analysis_elapsed != null">· {{job.result.agents.analysis_elapsed}} 秒</span></h3>
               <p v-if="job.result.agents.presentation_status === 'failed' || job.result.agents.presentation_status === 'skipped'" class="hint">表达优化未完成，当前显示原始分析结果。</p>
               <p v-if="job.result.agents.presentation" class="hint">以下内容由模型整理，请结合原始分析和日志核查。</p>
@@ -120,7 +139,13 @@ onUnmounted(() => clearTimeout(timer))
           </div>
         </section>
       </div>
-      <section class="history"><div class="section-title"><div><span class="number">04</span><h2>最近分析</h2></div><p>保存在本机，最多显示 50 条</p></div><p v-if="!history.length" class="hint">暂无分析记录。</p><div v-else class="history-list"><button v-for="item in history" :key="item.id" @click="showHistory(item)"><span>{{item.filename}}</span><span>{{new Date(item.created_at).toLocaleString('zh-CN')}}　 ·　 {{item.status === 'completed' ? '已完成' : item.status === 'partial' ? '部分识别' : item.status === 'failed' ? '失败' : '进行中'}}</span></button></div></section>
+      <section class="history"><div class="section-title"><div><span class="number">04</span><h2>最近分析</h2></div><p>保存在本机，最多显示 50 条</p></div>
+        <div class="tabs history-tabs" role="tablist" aria-label="按分析状态查看记录"><button v-for="group in groups" :key="group.id" role="tab" :aria-selected="historyTab === group.id" :class="{active:historyTab === group.id}" @click="changeHistoryTab(group.id)">{{group.label}}（{{history.filter(item => groupOf(item) === group.id).length}}）</button></div>
+        <p class="hint">按分析任务的完成状态分类；成功不代表日志没有异常。删除记录不会删除原始日志。</p>
+        <div v-if="visibleHistory.length && historyTab !== 'active'" class="history-actions"><label><input type="checkbox" :checked="allVisibleSelected" @change="selectVisible"> 全选当前分类</label><button class="delete-button" :disabled="!selectedHistory.length || deleting" @click="deleteHistory(selectedHistory)">删除所选（{{selectedHistory.length}}）</button></div>
+        <p v-if="historyMessage" class="hint" role="status">{{historyMessage}}</p><p v-if="!visibleHistory.length" class="hint">当前分类暂无记录。</p>
+        <div v-else class="history-list"><div v-for="item in visibleHistory" :key="item.id" class="history-row"><input v-if="historyTab !== 'active'" type="checkbox" v-model="selectedHistory" :value="item.id" :aria-label="`选择 ${item.filename} ${new Date(item.created_at).toLocaleString('zh-CN')}`"><button class="history-open" @click="showHistory(item)"><span>{{item.filename}}</span><span>{{new Date(item.created_at).toLocaleString('zh-CN')}}　 ·　 {{item.status === 'completed' ? '已完成' : item.status === 'partial' ? '部分识别' : item.status === 'failed' ? '失败' : '进行中'}}</span></button><button v-if="historyTab !== 'active'" class="delete-button" :disabled="deleting" :aria-label="`删除 ${item.filename} ${new Date(item.created_at).toLocaleString('zh-CN')}`" @click="deleteHistory([item.id])">删除</button></div></div>
+      </section>
     </main>
     <footer>DataBot · 本地日志分析演示</footer>
   </div>

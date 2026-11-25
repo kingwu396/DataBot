@@ -12,7 +12,7 @@ from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from model_agents import call_model, list_models, run_agents, validate_base_url
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -144,6 +144,10 @@ def new_job(filename):
 
 class AnalyzeRequest(BaseModel):
     filename: str
+
+
+class DeleteAnalysesRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=50)
 
 
 class ModelProfile(BaseModel):
@@ -322,6 +326,21 @@ def serialize(row):
 def history():
     with connect() as db:
         return [serialize(row) for row in db.execute("SELECT * FROM analyses ORDER BY created_at DESC LIMIT 50")]
+
+
+@app.post("/api/analyses/delete")
+def delete_analyses(request: DeleteAnalysesRequest):
+    ids = list(dict.fromkeys(request.ids))
+    placeholders = ','.join('?' for _ in ids)
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        rows = db.execute(f'SELECT id, status FROM analyses WHERE id IN ({placeholders})', ids).fetchall()
+        if len(rows) != len(ids):
+            raise HTTPException(404, '部分记录不存在，请刷新后重试')
+        if any(row['status'] not in ('completed', 'partial', 'failed') for row in rows):
+            raise HTTPException(409, '分析进行中，无法删除该记录')
+        db.execute(f'DELETE FROM analyses WHERE id IN ({placeholders})', ids)
+    return {'deleted': len(ids)}
 
 
 @app.get("/api/analyses/{job_id}")
