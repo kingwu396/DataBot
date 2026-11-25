@@ -40,7 +40,7 @@ async def lifespan(_app):
             id TEXT PRIMARY KEY, filename TEXT NOT NULL, status TEXT NOT NULL,
             created_at TEXT NOT NULL, elapsed REAL, result TEXT, error TEXT)""")
         db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        db.execute("UPDATE analyses SET status='failed', error='服务重启，任务未完成' WHERE status IN ('pending', 'running', 'recognizing', 'analyzing')")
+        db.execute("UPDATE analyses SET status='failed', error='服务重启，任务未完成' WHERE status IN ('pending', 'running', 'recognizing', 'analyzing', 'rewriting')")
     yield
 
 

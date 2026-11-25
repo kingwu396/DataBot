@@ -4,7 +4,8 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 const logs = ref([]), selected = ref(''), file = ref(null), source = ref('existing')
 const job = ref(null), history = ref([]), error = ref(''), busy = ref(false)
-const analysisHtml = computed(() => DOMPurify.sanitize(marked.parse(job.value?.result?.agents?.analysis || ''), { FORBID_TAGS: ['img', 'style'] }))
+const analysisHtml = computed(() => DOMPurify.sanitize(marked.parse(job.value?.result?.agents?.presentation || job.value?.result?.agents?.analysis || ''), { FORBID_TAGS: ['img', 'style'] }))
+const originalAnalysisHtml = computed(() => DOMPurify.sanitize(marked.parse(job.value?.result?.agents?.analysis || ''), { FORBID_TAGS: ['img', 'style'] }))
 const settings = ref({provider:'openai', profiles:{ollama:{base_url:'http://127.0.0.1:11434',model:''},openai:{base_url:'https://api.openai.com/v1',model:''}}, redact:true, api_key:'', has_api_key:false})
 const settingsMessage = ref(''), saving = ref(false), testing = ref(false), testMessage = ref('')
 const models = ref([]), loadingModels = ref(false), modelsMessage = ref('')
@@ -24,7 +25,7 @@ async function refreshHistory() { history.value = await api('/api/analyses') }
 async function poll(id) {
   try {
     job.value = await api(`/api/analyses/${id}`)
-    if (['pending','running','recognizing','analyzing'].includes(job.value.status)) timer = setTimeout(() => poll(id), 1000)
+    if (['pending','running','recognizing','analyzing','rewriting'].includes(job.value.status)) timer = setTimeout(() => poll(id), 1000)
     else { busy.value = false; await refreshHistory() }
   } catch (e) { error.value = e.message; busy.value = false }
 }
@@ -91,12 +92,19 @@ onUnmounted(() => clearTimeout(timer))
         </section>
         <section class="panel result-panel"><div class="section-title"><div><span class="number">03</span><h2>分析结果</h2></div><p v-if="job">{{job.filename}}</p></div>
           <div v-if="!job" class="empty"><div class="empty-icon">⌁</div><strong>选择日志，开始第一次分析</strong><p>完成后将在这里显示异常统计与日志片段。</p></div>
-          <div v-else-if="['pending','running','recognizing','analyzing'].includes(job.status)" class="empty"><div class="spinner"></div><strong>{{job.status==='recognizing' ? '异常识别 Agent 正在识别' : job.status==='analyzing' ? '问题分析 Agent 正在分析' : '正在扫描日志'}}</strong><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}，{{job.result.recognition_progress.chunks}} 个片段</p><p>大文件可能需要一些时间，请保持页面打开。</p></div>
+          <div v-else-if="['pending','running','recognizing','analyzing','rewriting'].includes(job.status)" class="empty"><div class="spinner"></div><strong>{{job.status==='recognizing' ? '异常识别 Agent 正在识别' : job.status==='analyzing' ? '问题分析 Agent 正在分析' : job.status==='rewriting' ? '正在整理分析结果' : '正在扫描日志'}}</strong><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}，{{job.result.recognition_progress.chunks}} 个片段</p><p>大文件可能需要一些时间，请保持页面打开。</p></div>
           <div v-else-if="job.status==='failed'" class="empty"><strong>分析未完成</strong><p class="error">{{job.error}}</p><p v-if="job.result?.recognition_progress">识别覆盖：{{size(job.result.recognition_progress.processed_bytes)}} / {{size(job.result.recognition_progress.total_bytes)}}</p></div>
           <div v-else-if="job.result"><div class="result-meta">{{job.status==='partial' ? '部分识别，未覆盖全部日志' : job.result.agents ? '两个 Agent 已完成' : '规则扫描记录'}} <span>{{job.elapsed}} 秒</span></div><div class="metrics"><div><span>日志记录</span><strong>{{job.result.counts.records.toLocaleString()}}</strong></div><div><span>错误记录</span><strong>{{job.result.counts.error.toLocaleString()}}</strong></div><div><span>警告记录</span><strong>{{job.result.counts.warning.toLocaleString()}}</strong></div></div><p class="hint">规则统计可能重叠；本地展示的片段可能含敏感信息。</p>
             <template v-if="job.result.agents">
+              <p class="hint">模型识别覆盖：{{size(job.result.agents.recognition.processed_bytes)}} / {{size(job.result.agents.recognition.total_bytes)}}<span v-if="!job.result.agents.recognition.complete">，剩余日志未识别</span>。</p>
               <h3>问题分析 Agent <span v-if="job.result.agents.analysis_elapsed != null">· {{job.result.agents.analysis_elapsed}} 秒</span></h3>
+              <p v-if="job.result.agents.presentation_status === 'failed' || job.result.agents.presentation_status === 'skipped'" class="hint">表达优化未完成，当前显示原始分析结果。</p>
+              <p v-if="job.result.agents.presentation" class="hint">以下内容由模型整理，请结合原始分析和日志核查。</p>
               <div class="analysis-markdown" v-html="analysisHtml"></div>
+              <details v-if="job.result.agents.presentation" class="result-details">
+                <summary>查看原始分析结果</summary>
+                <div class="analysis-markdown" v-html="originalAnalysisHtml"></div>
+              </details>
               <details class="result-details">
                 <summary>查看异常识别 Agent 的发现（{{job.result.agents.recognition.findings.length}} 条）</summary>
                 <p class="hint">模型已识别 {{size(job.result.agents.recognition.processed_bytes)}} / {{size(job.result.agents.recognition.total_bytes)}}，共 {{job.result.agents.recognition.chunks}} 个片段。<span v-if="job.result.agents.recognition.elapsed != null">识别耗时 {{job.result.agents.recognition.elapsed}} 秒。</span><span v-if="job.result.agents.recognition.note">{{job.result.agents.recognition.note}}。</span><span v-if="job.result.agents.recognition.omitted_findings">另有 {{job.result.agents.recognition.omitted_findings}} 条识别结果未纳入后续分析。</span></p>
